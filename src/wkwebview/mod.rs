@@ -352,7 +352,7 @@ impl InnerWebView {
       }
 
       #[cfg(feature = "transparent")]
-      if attributes.transparent {
+      if attributes.transparent || attributes.background_color.is_some() {
         let no = NSNumber::numberWithBool(false);
         // Equivalent Obj-C:
         config.setValue_forKey(Some(&no), ns_string!("drawsBackground"));
@@ -399,6 +399,22 @@ impl InnerWebView {
         };
         let webview: Retained<WryWebView> =
           objc2::msg_send![super(webview), initWithFrame: frame, configuration: &**config];
+
+        // Set the under-page background color for overscroll areas (public API, macOS 12+).
+        // drawsBackground is already disabled on the config above, so the window background
+        // shows through. This handles the color visible when scrolling past page bounds.
+        if os_major_version >= 12 {
+          if let Some((red, green, blue, alpha)) = attributes.background_color {
+            let color = objc2_app_kit::NSColor::colorWithSRGBRed_green_blue_alpha(
+              red as f64 / 255.0,
+              green as f64 / 255.0,
+              blue as f64 / 255.0,
+              alpha as f64 / 255.0,
+            );
+            webview.setUnderPageBackgroundColor(Some(&color));
+          }
+        }
+
         webview
       };
       #[cfg(target_os = "ios")]
@@ -903,6 +919,29 @@ r#"Object.defineProperty(window, 'ipc', {
       // This has to be monitored as it may clash with isOpaque = true.
       // The webview background color may also applied too late so actually not that useful.
       self.webview.setBackgroundColor(Some(&color));
+    }
+
+    #[cfg(all(target_os = "macos", feature = "transparent"))]
+    unsafe {
+      let (red, green, blue, alpha) = _background_color;
+
+      // Disable the default white background using the same drawsBackground KVC key
+      // as the `transparent` feature. On the webview instance (vs config) for runtime changes.
+      let no = NSNumber::numberWithBool(false);
+      self
+        .webview
+        .setValue_forKey(Some(&no), ns_string!("drawsBackground"));
+
+      let (os_major_version, _, _) = util::operating_system_version();
+      if os_major_version >= 12 {
+        let color = objc2_app_kit::NSColor::colorWithSRGBRed_green_blue_alpha(
+          red as f64 / 255.0,
+          green as f64 / 255.0,
+          blue as f64 / 255.0,
+          alpha as f64 / 255.0,
+        );
+        self.webview.setUnderPageBackgroundColor(Some(&color));
+      }
     }
 
     Ok(())
