@@ -795,6 +795,24 @@ pub struct WebViewAttributes<'a> {
 
   /// Whether JavaScript should be disabled.
   pub javascript_disabled: bool,
+
+  /// Controls the WebView's browser-level general autofill behavior.
+  ///
+  /// **This option does not disable password or credit card autofill.**
+  ///
+  /// When enabled, the WebView may automatically populate form fields using
+  /// previously stored data such as addresses or contact information.
+  ///
+  /// If not specified, this is `true` by default.
+  ///
+  /// ## Platform-specific
+  ///
+  /// - **Windows**: Supported. On Windows, WebView2's autofill feature (called
+  ///   "Suggestions") may not honor `autocomplete="off"` attributes on input
+  ///   elements in some cases. When this option is `false`, that autofill
+  ///   behavior will be disabled.
+  /// - **macOS / Linux / Android / iOS**: Unsupported and ignored.
+  pub general_autofill_enabled: bool,
 }
 
 impl Default for WebViewAttributes<'_> {
@@ -837,6 +855,7 @@ impl Default for WebViewAttributes<'_> {
       }),
       background_throttling: None,
       javascript_disabled: false,
+      general_autofill_enabled: true,
     }
   }
 }
@@ -1418,6 +1437,27 @@ impl<'a> WebViewBuilder<'a> {
   /// Whether JavaScript should be disabled.
   pub fn with_javascript_disabled(mut self) -> Self {
     self.attrs.javascript_disabled = true;
+    self
+  }
+
+  /// Controls the WebView's browser-level general autofill behavior.
+  ///
+  /// **This option does not disable password or credit card autofill.**
+  ///
+  /// When enabled, the WebView may automatically populate form fields using
+  /// previously stored data such as addresses or contact information.
+  ///
+  /// If not specified, this is `true` by default.
+  ///
+  /// ## Platform-specific
+  ///
+  /// - **Windows**: Supported. On Windows, WebView2's autofill feature (called
+  ///   "Suggestions") may not honor `autocomplete="off"` attributes on input
+  ///   elements in some cases. When this option is `false`, that autofill
+  ///   behavior will be disabled.
+  /// - **macOS / Linux / Android / iOS**: Unsupported and ignored.
+  pub fn with_general_autofill_enabled(mut self, enabled: bool) -> Self {
+    self.attrs.general_autofill_enabled = enabled;
     self
   }
 
