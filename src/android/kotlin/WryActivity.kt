@@ -152,6 +152,11 @@ abstract class WryActivity : AppCompatActivity() {
         Rust.onActivityLowMemory()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        Rust.onNewIntent(intent)
+    }
+
     fun getAppClass(name: String): Class<*> {
         return Class.forName(name)
     }

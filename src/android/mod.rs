@@ -15,7 +15,7 @@ use jni::{
   objects::{GlobalRef, JClass, JObject},
   JNIEnv,
 };
-use ndk::looper::{FdEvent, ThreadLooper};
+use ndk::looper::ThreadLooper;
 use once_cell::sync::{Lazy, OnceCell};
 use raw_window_handle::HasWindowHandle;
 use std::{
