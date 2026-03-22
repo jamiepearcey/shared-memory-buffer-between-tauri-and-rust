@@ -1837,8 +1837,14 @@ impl WebViewBuilderExtWindows for WebViewBuilder<'_> {
 #[cfg(target_os = "android")]
 #[derive(Default)]
 pub(crate) struct PlatformSpecificWebViewAttributes {
-  on_webview_created:
-    Option<Box<dyn Fn(prelude::Context) -> std::result::Result<(), jni::errors::Error> + Send>>,
+  on_webview_created: Option<
+    std::sync::Arc<
+      dyn Fn(prelude::Context) -> std::result::Result<(), jni::errors::Error>
+        + Send
+        + Sync
+        + 'static,
+    >,
+  >,
   with_asset_loader: bool,
   asset_loader_domain: Option<String>,
   https_scheme: bool,
@@ -1847,7 +1853,10 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
 #[cfg(target_os = "android")]
 pub trait WebViewBuilderExtAndroid {
   fn on_webview_created<
-    F: Fn(prelude::Context<'_, '_>) -> std::result::Result<(), jni::errors::Error> + Send + 'static,
+    F: Fn(prelude::Context<'_, '_>) -> std::result::Result<(), jni::errors::Error>
+      + Send
+      + Sync
+      + 'static,
   >(
     self,
     f: F,
@@ -1874,12 +1883,15 @@ pub trait WebViewBuilderExtAndroid {
 #[cfg(target_os = "android")]
 impl WebViewBuilderExtAndroid for WebViewBuilder<'_> {
   fn on_webview_created<
-    F: Fn(prelude::Context<'_, '_>) -> std::result::Result<(), jni::errors::Error> + Send + 'static,
+    F: Fn(prelude::Context<'_, '_>) -> std::result::Result<(), jni::errors::Error>
+      + Send
+      + Sync
+      + 'static,
   >(
     mut self,
     f: F,
   ) -> Self {
-    self.platform_specific.on_webview_created = Some(Box::new(f));
+    self.platform_specific.on_webview_created = Some(std::sync::Arc::new(f));
     self
   }
 
@@ -2487,7 +2499,9 @@ pub trait WebViewExtAndroid {
 #[cfg(target_os = "android")]
 impl WebViewExtAndroid for WebView {
   fn handle(&self) -> JniHandle {
-    JniHandle
+    JniHandle {
+      activity_id: self.webview.activity_id,
+    }
   }
 }
 
