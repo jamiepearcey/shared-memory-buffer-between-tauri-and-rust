@@ -2255,6 +2255,9 @@ pub trait WebViewExtWindows {
 
   /// Attaches this webview to the given HWND and removes it from the current one.
   fn reparent(&self, hwnd: isize) -> Result<()>;
+
+  /// Returns the child HWND hosting this webview.
+  fn hwnd(&self) -> windows::Win32::Foundation::HWND;
 }
 
 #[cfg(target_os = "windows")]
@@ -2281,6 +2284,11 @@ impl WebViewExtWindows for WebView {
 
   fn reparent(&self, hwnd: isize) -> Result<()> {
     self.webview.reparent(hwnd)
+  }
+
+  /// Returns the child HWND hosting this webview.
+  fn hwnd(&self) -> windows::Win32::Foundation::HWND {
+    self.webview.hwnd()
   }
 }
 
