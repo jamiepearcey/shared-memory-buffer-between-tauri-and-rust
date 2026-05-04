@@ -1372,11 +1372,6 @@ impl InnerWebView {
     &self.id
   }
 
-  #[inline]
-  pub fn hwnd(&self) -> HWND {
-    self.hwnd
-  }
-
   pub fn eval(
     &self,
     js: &str,
