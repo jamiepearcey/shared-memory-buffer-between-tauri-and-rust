@@ -1724,14 +1724,14 @@ tauri::Builder::default()
         // so we check using the first part of the domain
         #[cfg(any(windows, target_os = "android"))]
         let local = {
-          let protocol_url = self.manager().tauri_protocol_url(uses_https);
-          let maybe_protocol = current_url
+          let scheme = scheme == self.manager().tauri_protocol_url(uses_https).scheme();
+          let protocol = current_url
             .domain()
-            .and_then(|d| d .split_once('.'))
-            .unwrap_or_default()
-            .0;
+            .and_then(|d| d.strip_suffix(".localhost"))
+            .map(|protocol| protocols.contains_key(protocol))
+            .unwrap_or_default();
 
-          protocols.contains_key(maybe_protocol) && scheme == protocol_url.scheme()
+          scheme && protocol
         };
 
         local
@@ -2354,10 +2354,66 @@ impl<T: ScopeObject> ResolvedScope<T> {
 
 #[cfg(test)]
 mod tests {
+  use url::Url;
+
+  fn test_webview_window() -> crate::WebviewWindow<crate::test::MockRuntime> {
+    use crate::test::{mock_builder, mock_context, noop_assets};
+
+    // Create a mock app with proper context
+    let app = mock_builder().build(mock_context(noop_assets())).unwrap();
+
+    // Create a webview window
+    crate::WebviewWindowBuilder::new(&app, "test", crate::WebviewUrl::default())
+      .build()
+      .unwrap()
+  }
+
   #[test]
   fn webview_is_send_sync() {
     crate::test_utils::assert_send::<super::Webview>();
     crate::test_utils::assert_sync::<super::Webview>();
+  }
+
+  #[test]
+  fn tauri_protocol_is_local() {
+    let webview = test_webview_window().webview;
+
+    #[cfg(all(not(windows), not(target_os = "android")))]
+    assert!(webview.is_local_url(&Url::parse("tauri://localhost/").unwrap()));
+
+    #[cfg(any(windows, target_os = "android"))]
+    assert!(webview.is_local_url(&Url::parse("https://tauri.localhost/").unwrap()));
+  }
+
+  // On Windows/Android, custom protocols are served as `https://<name>.localhost/`.
+  // We ensure only `.localhost` domains are accepted to prevent a subdomain being able to
+  // impersonate a protocol name.
+  #[cfg(any(windows, target_os = "android"))]
+  #[test]
+  fn windows_custom_protocol_rejects_spoofed_domain() {
+    use crate::test::{mock_builder, mock_context, noop_assets};
+
+    let app = mock_builder()
+      .register_uri_scheme_protocol("myproto", |_, _| {
+        http::Response::builder().body(Vec::new()).unwrap()
+      })
+      .build(mock_context(noop_assets()))
+      .unwrap();
+    let webview = crate::WebviewWindowBuilder::new(&app, "test", crate::WebviewUrl::default())
+      .build()
+      .unwrap()
+      .webview;
+
+    let url = |s| Url::parse(s).unwrap();
+
+    // Legitimate Windows custom protocol URL
+    assert!(webview.is_local_url(&url("https://myproto.localhost/")));
+
+    // Attacker domain that starts with a registered protocol name — must NOT be local.
+    assert!(!webview.is_local_url(&url("https://myproto.evil.com/")));
+
+    // Subdomain of .localhost with unregistered name — must NOT be local
+    assert!(!webview.is_local_url(&url("https://notregistered.localhost/")));
   }
 
   /// Custom (non-plugin) commands must be rejected when the IPC request
@@ -2376,7 +2432,7 @@ mod tests {
       .unwrap();
 
     // Request from a remote origin for a custom (non-plugin) command
-    // – should be rejected even without an AppManifest.
+    // - should be rejected even without an AppManifest.
     let remote_result = crate::test::get_ipc_response(
       &webview,
       InvokeRequest {
@@ -2394,7 +2450,7 @@ mod tests {
       "custom command should be rejected from a remote origin"
     );
 
-    // Same command from the local origin – should NOT be rejected by the
+    // Same command from the local origin - should NOT be rejected by the
     // remote-origin guard (it may still fail because the command doesn't
     // exist, but the error message will be different).
     let local_result = crate::test::get_ipc_response(
@@ -2423,16 +2479,7 @@ mod tests {
   #[cfg(target_os = "macos")]
   #[test]
   fn test_webview_window_has_set_simple_fullscreen_method() {
-    use crate::test::{mock_builder, mock_context, noop_assets};
-
-    // Create a mock app with proper context
-    let app = mock_builder().build(mock_context(noop_assets())).unwrap();
-
-    // Get or create a webview window
-    let webview_window =
-      crate::WebviewWindowBuilder::new(&app, "test", crate::WebviewUrl::default())
-        .build()
-        .unwrap();
+    let webview_window = test_webview_window();
 
     // This should compile if set_simple_fullscreen exists
     let result = webview_window.set_simple_fullscreen(true);
