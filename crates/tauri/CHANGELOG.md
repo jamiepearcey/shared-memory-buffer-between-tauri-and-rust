@@ -2,6 +2,10 @@
 
 ## \[2.11.1]
 
+### Enhancements
+
+- [`5e3126ff7`](https://www.github.com/tauri-apps/tauri/commit/5e3126ff7045aec54811b227cb4d33d78b3957b5) ([#15338](https://www.github.com/tauri-apps/tauri/pull/15338)) Expose the monitor (display) APIs on mobile.
+
 ### Bug Fixes
 
 - [`5f479c0c3`](https://www.github.com/tauri-apps/tauri/commit/5f479c0c364d7f5d89a83eaff66fbb7ef5045ce9) ([#15336](https://www.github.com/tauri-apps/tauri/pull/15336)) Fix crash when using the requestPermission API on Android.
