@@ -2217,9 +2217,24 @@ pub enum MemoryUsageLevel {
   Low,
 }
 
+/// WebView2 COM handles associated with a Windows [`WebView`].
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+pub struct WebView2Handle {
+  /// The WebView2 controller.
+  pub controller: ICoreWebView2Controller,
+  /// The WebView2 environment.
+  pub environment: ICoreWebView2Environment,
+  /// The WebView2 webview instance.
+  pub webview: ICoreWebView2,
+}
+
 /// Additional methods on `WebView` that are specific to Windows.
 #[cfg(target_os = "windows")]
 pub trait WebViewExtWindows {
+  /// Returns the WebView2 controller, environment and webview COM handles.
+  fn webview2(&self) -> WebView2Handle;
+
   /// Returns the WebView2 controller.
   fn controller(&self) -> ICoreWebView2Controller;
 
@@ -2258,6 +2273,14 @@ pub trait WebViewExtWindows {
 
 #[cfg(target_os = "windows")]
 impl WebViewExtWindows for WebView {
+  fn webview2(&self) -> WebView2Handle {
+    WebView2Handle {
+      controller: self.controller(),
+      environment: self.environment(),
+      webview: self.webview(),
+    }
+  }
+
   fn controller(&self) -> ICoreWebView2Controller {
     self.webview.controller.clone()
   }
