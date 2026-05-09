@@ -9156,9 +9156,12 @@ name = "tauri-plugin-shared-buffer"
 version = "0.1.0"
 dependencies = [
  "log",
+ "memmap2",
  "serde",
  "serde_json",
  "tauri",
+ "tauri-plugin",
+ "tempfile",
  "thiserror 2.0.12",
  "webview2-com",
  "windows-core 0.61.0",
