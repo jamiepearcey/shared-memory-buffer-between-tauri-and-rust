@@ -10,7 +10,6 @@ use tauri::{
   Manager, Runtime, State, WebviewWindow,
 };
 
-#[cfg(any(test, windows))]
 mod shared_ipc;
 
 const DEFAULT_CHANNEL_CAPACITY: u64 = 1024 * 1024;
@@ -43,6 +42,7 @@ const INIT_SCRIPT: &str = r#"
     waiters: new Map(),
     nextRequestId: 1,
     invokeImpl: null,
+    isWebView2: !!(window.chrome && window.chrome.webview),
     setInvoke(invoke) {
       this.invokeImpl = invoke;
     },
@@ -54,6 +54,36 @@ const INIT_SCRIPT: &str = r#"
           responseCapacity: options.responseCapacity || 1048576
         }
       });
+      if (!sharedIpcApi.isWebView2 && info.requestBufferId && info.requestBufferId !== 0 && info.responseBufferId && info.responseBufferId !== 0) {
+        const requestBuffer = new ArrayBuffer(info.requestCapacity);
+        const responseBuffer = new ArrayBuffer(info.responseCapacity);
+        const requestView = new DataView(requestBuffer);
+        const responseView = new DataView(responseBuffer);
+        requestView.setUint32(8, 16, true);
+        responseView.setUint32(8, 16, true);
+        const channel = new SharedIpcChannel(
+          info.id,
+          requestBuffer,
+          responseBuffer,
+          info.requestCapacity,
+          info.responseCapacity,
+          {
+            requestBufferId: info.requestBufferId,
+            responseBufferId: info.responseBufferId,
+            requestPath: info.requestPath,
+            responsePath: info.responsePath,
+            useInvokeBridge: true
+          }
+        );
+        sharedIpcApi.channels.set(info.id, channel);
+        window.dispatchEvent(new CustomEvent("tauri://webview2-shared-ipc-channel", {
+          detail: { id: info.id, channel }
+        }));
+        return channel;
+      }
+      if (!sharedIpcApi.isWebView2) {
+        throw new Error("WebView2 shared IPC channel fallback metadata was not returned by the plugin");
+      }
       return await waitForChannel(info.id);
     },
     getChannel(id) {
@@ -65,7 +95,7 @@ const INIT_SCRIPT: &str = r#"
   window.__TAURI_WEBVIEW2_SHARED_IPC__ = sharedIpcApi;
 
   class SharedIpcChannel {
-    constructor(id, requestBuffer, responseBuffer, requestCapacity, responseCapacity) {
+    constructor(id, requestBuffer, responseBuffer, requestCapacity, responseCapacity, nativeMetadata = null) {
       this.id = id;
       this.requestBuffer = requestBuffer;
       this.responseBuffer = responseBuffer;
@@ -76,6 +106,7 @@ const INIT_SCRIPT: &str = r#"
       this.requestBytes = new Uint8Array(requestBuffer);
       this.responseBytes = new Uint8Array(responseBuffer);
       this.queue = Promise.resolve();
+      this.nativeMetadata = nativeMetadata;
     }
 
     invoke(method, payload) {
@@ -86,10 +117,28 @@ const INIT_SCRIPT: &str = r#"
         }
 
         writeRequestFrame(this, requestId, method, payload);
+        if (this.nativeMetadata && this.nativeMetadata.useInvokeBridge) {
+          const requestWriteOffset = this.requestView.getUint32(8, true);
+          await invoke("plugin:webview2-shared-buffer|write_shared_buffer", {
+            id: this.nativeMetadata.requestBufferId,
+            offset: 0,
+            bytes: this.requestBytes.subarray(0, requestWriteOffset)
+          });
+        }
+
         const invoke = sharedIpcApi.invokeImpl || getTauriInvoke();
         const result = await invoke("plugin:webview2-shared-buffer|dispatch_shared_channel", {
           channelId: this.id
         });
+        if (this.nativeMetadata && this.nativeMetadata.useInvokeBridge) {
+          const responseBytes = await invoke("plugin:webview2-shared-buffer|read_shared_buffer", {
+            id: this.nativeMetadata.responseBufferId,
+            offset: 0,
+            length: result.responseWriteOffset
+          });
+          this.responseBytes = new Uint8Array(responseBytes);
+          this.responseView = new DataView(this.responseBytes.buffer);
+        }
         return readResponseFrame(this, requestId, result.responseWriteOffset);
       };
 
@@ -363,6 +412,14 @@ pub struct SharedChannelInfo {
   pub id: u64,
   pub request_capacity: u64,
   pub response_capacity: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub request_buffer_id: Option<u64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub response_buffer_id: Option<u64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub request_path: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub response_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -774,20 +831,319 @@ mod platform {
 #[cfg(not(windows))]
 mod platform {
   use super::*;
+  use std::collections::HashMap;
+  use std::ops::DerefMut;
+  use std::sync::atomic::{AtomicU64, Ordering};
+  use std::sync::{Arc, Mutex};
 
-  #[derive(Default)]
-  pub struct SharedBufferStore;
+  use memmap2::{MmapMut, MmapOptions};
+  use tempfile::NamedTempFile;
+
+  pub struct SharedBufferStore {
+    next_buffer_id: AtomicU64,
+    next_channel_id: AtomicU64,
+    buffers: Mutex<HashMap<u64, SharedBufferEntry>>,
+    channels: Mutex<HashMap<u64, SharedChannel>>,
+    methods: Mutex<HashMap<String, SharedIpcHandler>>,
+  }
+
+  #[derive(Clone)]
+  struct SharedBufferEntry {
+    #[allow(dead_code)]
+    _file: Arc<NamedTempFile>,
+    path: String,
+    size: usize,
+    map: Arc<Mutex<MmapMut>>,
+  }
+
+  #[derive(Clone)]
+  struct SharedChannel {
+    request_id: u64,
+    response_id: u64,
+  }
+
+  pub struct ChannelDescriptor {
+    pub request_buffer_id: u64,
+    pub response_buffer_id: u64,
+    pub request_path: String,
+    pub response_path: String,
+  }
+
+  impl Default for SharedBufferStore {
+    fn default() -> Self {
+      Self {
+        next_buffer_id: AtomicU64::new(1),
+        next_channel_id: AtomicU64::new(1),
+        buffers: Mutex::new(HashMap::new()),
+        channels: Mutex::new(HashMap::new()),
+        methods: Mutex::new(HashMap::new()),
+      }
+    }
+  }
 
   impl SharedBufferStore {
     pub fn reserve_buffer_id(&self) -> u64 {
-      0
+      self.next_buffer_id.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn reserve_channel_id(&self) -> u64 {
-      0
+      self.next_channel_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn register_method(&self, _method: impl Into<String>, _handler: SharedIpcHandler) {}
+    pub fn register_method(&self, method: impl Into<String>, handler: SharedIpcHandler) {
+      self.methods.lock().unwrap().insert(method.into(), handler);
+    }
+
+    pub fn create_and_post_buffer(
+      &self,
+      id: u64,
+      request: CreateSharedBufferRequest,
+    ) -> Result<()> {
+      validate_create_request(&request)?;
+
+      if request.initial_contents.len() > request.size as usize {
+        return Err(Error::InitialContentsTooLarge);
+      }
+
+      let entry = create_mmap_buffer(id, request.size as usize)?;
+      {
+        let mut map = entry.map.lock().unwrap();
+        let copy_len = request.initial_contents.len();
+        if copy_len > 0 {
+          map[..copy_len].copy_from_slice(&request.initial_contents);
+        }
+      }
+
+      self.buffers.lock().unwrap().insert(id, entry);
+      Ok(())
+    }
+
+    pub fn create_and_post_channel(
+      &self,
+      id: u64,
+      request: CreateSharedChannelRequest,
+    ) -> Result<ChannelDescriptor> {
+      validate_channel_request(&request)?;
+      let request_buffer_id = self.reserve_buffer_id();
+      let response_buffer_id = self.reserve_buffer_id();
+
+      let request_entry = create_mmap_buffer(request_buffer_id, request.request_capacity as usize)?;
+      let response_entry =
+        create_mmap_buffer(response_buffer_id, request.response_capacity as usize)?;
+      let response_path = response_entry.path.clone();
+
+      {
+        let mut request_map = request_entry.map.lock().unwrap();
+        shared_ipc::init_buffer(request_map.deref_mut())?;
+      }
+
+      {
+        let mut response_map = response_entry.map.lock().unwrap();
+        shared_ipc::init_buffer(response_map.deref_mut())?;
+      }
+
+      self
+        .buffers
+        .lock()
+        .unwrap()
+        .insert(request_buffer_id, request_entry.clone());
+      self
+        .buffers
+        .lock()
+        .unwrap()
+        .insert(response_buffer_id, response_entry);
+      self.channels.lock().unwrap().insert(
+        id,
+        SharedChannel {
+          request_id: request_buffer_id,
+          response_id: response_buffer_id,
+        },
+      );
+
+      Ok(ChannelDescriptor {
+        request_buffer_id,
+        response_buffer_id,
+        request_path: request_entry.path,
+        response_path,
+      })
+    }
+
+    pub fn dispatch_channel(&self, channel_id: u64) -> Result<SharedChannelDispatch> {
+      let (request_id, response_id) = {
+        let channels = self.channels.lock().unwrap();
+        let channel = channels
+          .get(&channel_id)
+          .ok_or(Error::ChannelNotFound(channel_id))?;
+        (channel.request_id, channel.response_id)
+      };
+
+      let request_entry = {
+        let buffers = self.buffers.lock().unwrap();
+        buffers
+          .get(&request_id)
+          .cloned()
+          .ok_or(Error::BufferNotFound(request_id))?
+      };
+      let response_entry = {
+        let buffers = self.buffers.lock().unwrap();
+        buffers
+          .get(&response_id)
+          .cloned()
+          .ok_or(Error::BufferNotFound(response_id))?
+      };
+
+      let response_write_offset = {
+        let mut request = request_entry.map.lock().unwrap();
+        let mut response = response_entry.map.lock().unwrap();
+        shared_ipc::init_buffer(response.deref_mut())?;
+        shared_ipc::dispatch_requests(
+          channel_id,
+          request.deref_mut(),
+          response.deref_mut(),
+          |request| {
+            let handler = self.methods.lock().unwrap().get(request.method).cloned();
+            match handler {
+              Some(handler) => match handler(request) {
+                Ok(response) => (shared_ipc::STATUS_OK, response),
+                Err(error) => (shared_ipc::STATUS_ERROR, error.to_string().into_bytes()),
+              },
+              None => (
+                shared_ipc::STATUS_ERROR,
+                Error::MethodNotFound(request.method.to_string())
+                  .to_string()
+                  .into_bytes(),
+              ),
+            }
+          },
+        )?
+      };
+
+      Ok(SharedChannelDispatch {
+        channel_id,
+        response_write_offset: response_write_offset as u32,
+      })
+    }
+
+    #[cfg(test)]
+    pub fn access_buffer<R>(
+      &self,
+      id: u64,
+      access: impl FnOnce(&mut [u8]) -> Result<R>,
+    ) -> Result<R> {
+      let buffers = self.buffers.lock().unwrap();
+      let entry = buffers.get(&id).ok_or(Error::BufferNotFound(id))?.clone();
+      let map = entry
+        .map
+        .lock()
+        .map_err(|_| Error::WebView2("shared mmap lock was poisoned".into()))?;
+      let mut map = map;
+      access(map.deref_mut())
+    }
+
+    pub fn write(&self, request: WriteSharedBufferRequest) -> Result<()> {
+      let buffers = self.buffers.lock().unwrap();
+      let entry = buffers
+        .get(&request.id)
+        .ok_or(Error::BufferNotFound(request.id))?;
+      let end = request
+        .offset
+        .checked_add(request.bytes.len() as u64)
+        .ok_or(Error::WriteOutOfBounds)?;
+
+      if end > entry.size as u64 {
+        return Err(Error::WriteOutOfBounds);
+      }
+
+      let mut map = entry.map.lock().unwrap();
+      map[request.offset as usize..end as usize].copy_from_slice(&request.bytes);
+      Ok(())
+    }
+
+    pub fn read(&self, request: ReadSharedBufferRequest) -> Result<Vec<u8>> {
+      let buffers = self.buffers.lock().unwrap();
+      let entry = buffers
+        .get(&request.id)
+        .ok_or(Error::BufferNotFound(request.id))?;
+      let end = request
+        .offset
+        .checked_add(request.length)
+        .ok_or(Error::ReadOutOfBounds)?;
+
+      if end > entry.size as u64 {
+        return Err(Error::ReadOutOfBounds);
+      }
+
+      let map = entry.map.lock().unwrap();
+      Ok(map[request.offset as usize..end as usize].to_vec())
+    }
+
+    pub fn close_buffer(&self, id: u64) -> Result<()> {
+      self
+        .buffers
+        .lock()
+        .unwrap()
+        .remove(&id)
+        .map(|_| ())
+        .ok_or(Error::BufferNotFound(id))
+    }
+
+    pub fn close_channel(&self, id: u64) -> Result<()> {
+      let channel = self
+        .channels
+        .lock()
+        .unwrap()
+        .remove(&id)
+        .ok_or(Error::ChannelNotFound(id))?;
+      self
+        .buffers
+        .lock()
+        .unwrap()
+        .remove(&channel.request_id)
+        .ok_or(Error::BufferNotFound(channel.request_id))?;
+      self
+        .buffers
+        .lock()
+        .unwrap()
+        .remove(&channel.response_id)
+        .ok_or(Error::BufferNotFound(channel.response_id))?;
+      Ok(())
+    }
+  }
+
+  fn create_mmap_buffer(id: u64, size: usize) -> Result<SharedBufferEntry> {
+    if size == 0 {
+      return Err(Error::EmptyBuffer);
+    }
+    if size > u32::MAX as usize {
+      return Err(Error::BufferTooLarge);
+    }
+
+    let file = NamedTempFile::new().map_err(|error| {
+      Error::WebView2(format!(
+        "failed to create mmap backing file for buffer {id}: {error}"
+      ))
+    })?;
+    file.as_file().set_len(size as u64).map_err(|error| {
+      Error::WebView2(format!(
+        "failed to resize mmap backing file for buffer {id}: {error}"
+      ))
+    })?;
+
+    let map = unsafe {
+      MmapOptions::new()
+        .len(size)
+        .map_mut(file.as_file())
+        .map_err(|error| Error::WebView2(format!("failed to map shared buffer {id}: {error}")))?
+    };
+
+    let path = file.path().to_string_lossy().into_owned();
+
+    Ok(SharedBufferEntry {
+      _file: Arc::new(file),
+      path,
+      size,
+      map: Arc::new(Mutex::new(map)),
+    })
   }
 }
 
@@ -808,6 +1164,33 @@ fn validate_create_request(request: &CreateSharedBufferRequest) -> Result<()> {
 }
 
 #[cfg(windows)]
+fn validate_channel_request(request: &CreateSharedChannelRequest) -> Result<()> {
+  if request.request_capacity < shared_ipc::MIN_CHANNEL_CAPACITY as u64
+    || request.response_capacity < shared_ipc::MIN_CHANNEL_CAPACITY as u64
+  {
+    return Err(Error::ChannelBufferTooSmall);
+  }
+  if request.request_capacity > u32::MAX as u64 || request.response_capacity > u32::MAX as u64 {
+    return Err(Error::BufferTooLarge);
+  }
+  Ok(())
+}
+
+#[cfg(not(windows))]
+fn validate_create_request(request: &CreateSharedBufferRequest) -> Result<()> {
+  if request.size == 0 {
+    return Err(Error::EmptyBuffer);
+  }
+  if request.size > u32::MAX as u64 {
+    return Err(Error::BufferTooLarge);
+  }
+  if request.initial_contents.len() > request.size as usize {
+    return Err(Error::InitialContentsTooLarge);
+  }
+  Ok(())
+}
+
+#[cfg(not(windows))]
 fn validate_channel_request(request: &CreateSharedChannelRequest) -> Result<()> {
   if request.request_capacity < shared_ipc::MIN_CHANNEL_CAPACITY as u64
     || request.response_capacity < shared_ipc::MIN_CHANNEL_CAPACITY as u64
@@ -867,8 +1250,13 @@ fn create_shared_buffer<R: Runtime>(
 
   #[cfg(not(windows))]
   {
-    let _ = (webview_window, state, request);
-    Err(Error::UnsupportedPlatform)
+    let _ = webview_window;
+    validate_create_request(&request)?;
+    let id = state.reserve_buffer_id();
+    let size = request.size;
+    let state = state.inner().clone();
+    state.create_and_post_buffer(id, request)?;
+    Ok(SharedBufferInfo { id, size })
   }
 }
 
@@ -901,8 +1289,21 @@ fn create_shared_channel<R: Runtime>(
 
   #[cfg(not(windows))]
   {
-    let _ = (webview_window, state, request);
-    Err(Error::UnsupportedPlatform)
+    let _ = webview_window;
+    validate_channel_request(&request)?;
+    let id = state.reserve_channel_id();
+    let request_capacity = request.request_capacity;
+    let response_capacity = request.response_capacity;
+    let descriptor = state.create_and_post_channel(id, request)?;
+    Ok(SharedChannelInfo {
+      id,
+      request_capacity,
+      response_capacity,
+      request_buffer_id: Some(descriptor.request_buffer_id),
+      response_buffer_id: Some(descriptor.response_buffer_id),
+      request_path: Some(descriptor.request_path),
+      response_path: Some(descriptor.response_path),
+    })
   }
 }
 
@@ -918,8 +1319,7 @@ fn dispatch_shared_channel(
 
   #[cfg(not(windows))]
   {
-    let _ = (state, channel_id);
-    Err(Error::UnsupportedPlatform)
+    state.dispatch_channel(channel_id)
   }
 }
 
@@ -935,8 +1335,7 @@ fn write_shared_buffer(
 
   #[cfg(not(windows))]
   {
-    let _ = (state, request);
-    Err(Error::UnsupportedPlatform)
+    state.write(request)
   }
 }
 
@@ -952,8 +1351,7 @@ fn read_shared_buffer(
 
   #[cfg(not(windows))]
   {
-    let _ = (state, request);
-    Err(Error::UnsupportedPlatform)
+    state.read(request)
   }
 }
 
@@ -966,8 +1364,7 @@ fn close_shared_buffer(state: State<'_, Arc<SharedBufferStore>>, id: u64) -> Res
 
   #[cfg(not(windows))]
   {
-    let _ = (state, id);
-    Err(Error::UnsupportedPlatform)
+    state.close_buffer(id)
   }
 }
 
@@ -980,8 +1377,7 @@ fn close_shared_channel(state: State<'_, Arc<SharedBufferStore>>, id: u64) -> Re
 
   #[cfg(not(windows))]
   {
-    let _ = (state, id);
-    Err(Error::UnsupportedPlatform)
+    state.close_channel(id)
   }
 }
 
@@ -1002,4 +1398,251 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
       close_shared_channel
     ])
     .build()
+}
+
+#[cfg(test)]
+#[cfg(not(windows))]
+mod tests {
+  use super::*;
+  use std::time::Instant;
+
+  fn with_mmap_store() -> Arc<SharedBufferStore> {
+    Arc::new(SharedBufferStore::default())
+  }
+
+  fn echo_handler<'a>(request: SharedIpcRequest<'a>) -> Result<Vec<u8>> {
+    Ok(request.payload.to_vec())
+  }
+
+  #[test]
+  fn mmap_buffer_crud_round_trips() {
+    let store = with_mmap_store();
+    let id = store.reserve_buffer_id();
+    store
+      .create_and_post_buffer(
+        id,
+        CreateSharedBufferRequest {
+          size: 4096,
+          read_only: false,
+          additional_data: serde_json::json!({ "test": "buffer-crud" }),
+          initial_contents: b"hello".to_vec(),
+        },
+      )
+      .unwrap();
+
+    store
+      .write(WriteSharedBufferRequest {
+        id,
+        offset: 16,
+        bytes: b"world".to_vec(),
+      })
+      .unwrap();
+
+    let bytes = store
+      .read(ReadSharedBufferRequest {
+        id,
+        offset: 16,
+        length: 5,
+      })
+      .unwrap();
+    assert_eq!(bytes, b"world");
+
+    let full = store
+      .read(ReadSharedBufferRequest {
+        id,
+        offset: 0,
+        length: 16,
+      })
+      .unwrap();
+    assert_eq!(&full[..5], b"hello");
+
+    store.close_buffer(id).unwrap();
+    assert!(matches!(
+      store.close_buffer(id),
+      Err(Error::BufferNotFound(_))
+    ));
+  }
+
+  #[test]
+  fn mmap_shared_ipc_channel_dispatches_registered_method() -> Result<()> {
+    let store = with_mmap_store();
+    store.register_method("echo", Arc::new(echo_handler));
+    let request = CreateSharedChannelRequest {
+      request_capacity: 4096,
+      response_capacity: 4096,
+    };
+    let channel_id = store.reserve_channel_id();
+    let descriptor = store.create_and_post_channel(channel_id, request).unwrap();
+
+    let _request_payload = {
+      let request_write = store.access_buffer(descriptor.request_buffer_id, |map| {
+        shared_ipc::init_buffer(map)?;
+        shared_ipc::write_request_frame(map, 1, "echo", b"ping")
+      })?;
+      request_write
+    };
+
+    let dispatch = store.dispatch_channel(channel_id).unwrap();
+    let response_bytes = store.access_buffer(descriptor.response_buffer_id, |map| {
+      shared_ipc::read_response_frame(map, dispatch.response_write_offset as usize, 1)
+    })?;
+
+    assert_eq!(response_bytes.payload, b"ping");
+    assert_eq!(response_bytes.status, shared_ipc::STATUS_OK);
+    Ok(())
+  }
+
+  #[test]
+  fn mmap_channel_close_removes_buffers() {
+    let store = with_mmap_store();
+    let channel_id = store.reserve_channel_id();
+    let descriptor = store
+      .create_and_post_channel(
+        channel_id,
+        CreateSharedChannelRequest {
+          request_capacity: 4096,
+          response_capacity: 4096,
+        },
+      )
+      .unwrap();
+
+    assert!(store
+      .read(ReadSharedBufferRequest {
+        id: descriptor.request_buffer_id,
+        offset: 0,
+        length: 4
+      })
+      .is_ok());
+
+    store.close_channel(channel_id).unwrap();
+    assert!(matches!(
+      store.read(ReadSharedBufferRequest {
+        id: descriptor.request_buffer_id,
+        offset: 0,
+        length: 4
+      }),
+      Err(Error::BufferNotFound(_))
+    ));
+    assert!(matches!(
+      store.read(ReadSharedBufferRequest {
+        id: descriptor.response_buffer_id,
+        offset: 0,
+        length: 4
+      }),
+      Err(Error::BufferNotFound(_))
+    ));
+    assert!(matches!(
+      store.dispatch_channel(channel_id),
+      Err(Error::ChannelNotFound(_))
+    ));
+  }
+
+  #[test]
+  #[ignore = "performance baseline; run explicitly with `cargo test -p tauri-plugin-shared-buffer -- --ignored --nocapture`"]
+  fn performance_mmap_channel_vs_json_ipc_large_payload() -> Result<()> {
+    let store = with_mmap_store();
+    store.register_method("echo", Arc::new(echo_handler));
+
+    let request = CreateSharedChannelRequest {
+      request_capacity: 1_048_576,
+      response_capacity: 1_048_576,
+    };
+    let channel_id = store.reserve_channel_id();
+    let descriptor = store.create_and_post_channel(channel_id, request).unwrap();
+
+    const ITERATIONS: usize = 2_000;
+    const PAYLOAD_LEN: usize = 64 * 1024;
+    let payload = vec![42; PAYLOAD_LEN];
+
+    let shared_start = Instant::now();
+    for request_id in 0..ITERATIONS {
+      store.access_buffer(descriptor.request_buffer_id, |map| {
+        shared_ipc::init_buffer(map)?;
+        shared_ipc::write_request_frame(map, request_id as u32, "echo", &payload).map(|_| ())
+      })?;
+      let dispatch = store.dispatch_channel(channel_id).unwrap();
+      store.access_buffer(descriptor.response_buffer_id, |response_map| {
+        let _frame = shared_ipc::read_response_frame(
+          response_map,
+          dispatch.response_write_offset as usize,
+          request_id as u32,
+        )?;
+        Ok(())
+      })?;
+    }
+    let shared_elapsed = shared_start.elapsed();
+
+    let json_start = Instant::now();
+    for _ in 0..ITERATIONS {
+      let json = serde_json::to_vec(&serde_json::json!({
+        "method": "echo",
+        "payload": payload,
+      }))
+      .unwrap();
+      let decoded: serde_json::Value = serde_json::from_slice(&json).unwrap();
+      let payload = decoded["payload"].as_array().unwrap();
+      assert_eq!(payload.len(), PAYLOAD_LEN);
+    }
+    let json_elapsed = json_start.elapsed();
+
+    println!(
+      "mmap shared ipc (large payload): {shared_elapsed:?}, json baseline: {json_elapsed:?}"
+    );
+    assert!(shared_elapsed < json_elapsed);
+    Ok(())
+  }
+
+  #[test]
+  #[ignore = "performance baseline; run explicitly with `cargo test -p tauri-plugin-shared-buffer -- --ignored --nocapture`"]
+  fn performance_mmap_channel_vs_json_ipc_small_payloads() -> Result<()> {
+    let store = with_mmap_store();
+    store.register_method("echo", Arc::new(echo_handler));
+
+    let request = CreateSharedChannelRequest {
+      request_capacity: 4096,
+      response_capacity: 4096,
+    };
+    let channel_id = store.reserve_channel_id();
+    let descriptor = store.create_and_post_channel(channel_id, request).unwrap();
+
+    const ITERATIONS: usize = 5_000;
+    const PAYLOAD_LEN: usize = 256;
+    let payload = vec![7; PAYLOAD_LEN];
+
+    let shared_start = Instant::now();
+    for request_id in 0..ITERATIONS {
+      store.access_buffer(descriptor.request_buffer_id, |map| {
+        shared_ipc::init_buffer(map)?;
+        shared_ipc::write_request_frame(map, request_id as u32, "echo", &payload).map(|_| ())
+      })?;
+      let dispatch = store.dispatch_channel(channel_id).unwrap();
+      store.access_buffer(descriptor.response_buffer_id, |response_map| {
+        let _frame = shared_ipc::read_response_frame(
+          response_map,
+          dispatch.response_write_offset as usize,
+          request_id as u32,
+        )?;
+        Ok(())
+      })?;
+    }
+    let shared_elapsed = shared_start.elapsed();
+
+    let json_start = Instant::now();
+    for _ in 0..ITERATIONS {
+      let json = serde_json::to_vec(&serde_json::json!({
+        "method": "echo",
+        "payload": payload,
+      }))
+      .unwrap();
+      let decoded: serde_json::Value = serde_json::from_slice(&json).unwrap();
+      assert_eq!(decoded["payload"].as_array().unwrap().len(), PAYLOAD_LEN);
+    }
+    let json_elapsed = json_start.elapsed();
+
+    println!(
+      "mmap shared ipc (small payload): {shared_elapsed:?}, json baseline: {json_elapsed:?}"
+    );
+    assert!(shared_elapsed < json_elapsed);
+    Ok(())
+  }
 }

@@ -1,0 +1,11 @@
+[default]
+description = "Default shared buffer permissions"
+permissions = [
+  "allow-create-shared-buffer",
+  "allow-read-shared-buffer",
+  "allow-write-shared-buffer",
+  "allow-close-shared-buffer",
+  "allow-create-shared-channel",
+  "allow-dispatch-shared-channel",
+  "allow-close-shared-channel",
+]

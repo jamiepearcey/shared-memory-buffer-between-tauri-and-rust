@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-read-shared-buffer"
+description = "Enables the read_shared_buffer command without any pre-configured scope."
+commands.allow = ["read_shared_buffer"]
+
+[[permission]]
+identifier = "deny-read-shared-buffer"
+description = "Denies the read_shared_buffer command without any pre-configured scope."
+commands.deny = ["read_shared_buffer"]

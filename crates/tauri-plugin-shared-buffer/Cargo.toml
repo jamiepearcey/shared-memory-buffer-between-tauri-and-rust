@@ -1,5 +1,6 @@
 [package]
 name = "tauri-plugin-shared-buffer"
+links = "webview2-shared-buffer"
 version = "0.1.0"
 description = "Expose WebView2 shared buffers to Tauri webviews"
 authors.workspace = true
@@ -16,6 +17,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.11.1", path = "../tauri" }
 thiserror = "2"
+memmap2 = "0.9"
+tempfile = "3"
+
+[build-dependencies]
+tauri-plugin = { path = "../tauri-plugin", features = ["build"] }
 
 [target."cfg(windows)".dependencies]
 webview2-com = "0.38"

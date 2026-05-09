@@ -1,6 +1,11 @@
 # tauri-plugin-shared-buffer
 
-Windows-only Tauri plugin that uses WebView2 shared buffers to expose host memory to JavaScript as an `ArrayBuffer`.
+Cross-platform Tauri plugin that exposes host memory to JavaScript with:
+
+- native WebView2 shared buffers on Windows
+- mmap-backed channels on non-Windows
+
+The exposed APIs and command contract stay the same across platforms.
 
 Register the plugin:
 
@@ -34,7 +39,15 @@ const response = await channel.invoke("uppercase", new TextEncoder().encode("hel
 console.log(new TextDecoder().decode(response)); // HELLO
 ```
 
-The channel writes request frames into a WebView2 shared buffer, calls a tiny Tauri command as a doorbell, and reads response frames from a second shared buffer. The command payload carries the channel id only; method payload bytes stay in shared memory.
+On Windows, the channel writes request frames into a WebView2 shared buffer, calls a tiny Tauri command as a doorbell, and reads response frames from a second shared buffer. The command payload carries the channel id only; method payload bytes stay in shared memory.
+
+On non-Windows, the channel uses two file-backed mmap buffers and an invoke bridge for each call:
+
+- request bytes are copied into the request buffer via `write_shared_buffer`
+- the same `dispatch_shared_channel` command processes frames inside the same buffer format
+- response bytes are read back through `read_shared_buffer`
+
+This keeps binary payload shape in the same shared-frame format, while still using command calls for cross-process synchronization on platforms without WebView2 shared buffers.
 
 Create and receive a shared buffer from JavaScript:
 
@@ -79,7 +92,14 @@ Measured baseline:
 
 | Scenario | Shared-memory frames | JSON-style IPC baseline |
 | --- | ---: | ---: |
-| Large binary payloads, 2,000 iterations, 125.0 MiB total | 14.316834 ms, 8731.0 MiB/s | 16.264259959 s, 7.7 MiB/s |
-| Small binary payloads, 10,000 iterations, 2.4 MiB total | 15.827209 ms, 154.3 MiB/s | 369.489125 ms, 6.6 MiB/s |
+| Large binary payloads, 2,000 iterations, 125.0 MiB total | 16.763208 ms, 7456.8 MiB/s | 15.658740208 s, 8.0 MiB/s |
+| Small binary payloads, 10,000 iterations, 2.4 MiB total | 16.249375 ms, 150.2 MiB/s | 384.971166 ms, 6.3 MiB/s |
+
+Mmap fallback (non-Windows) in-process baseline:
+
+| Scenario | Mmap fallback dispatch | JSON-style IPC baseline |
+| --- | ---: | ---: |
+| Large binary payloads, 2,000 iterations, 125.0 MiB total | 21.631042 ms, 5784.3 MiB/s | 19.874050333 s, 6.3 MiB/s |
+| Small binary payloads, 10,000 iterations, 2.4 MiB total | 19.913041 ms, 120.5 MiB/s | 194.860917 ms, 12.3 MiB/s |
 
 These numbers measure local frame dispatch and serialization overhead. They do not include a live WebView2 runtime or frontend event-loop timing.
