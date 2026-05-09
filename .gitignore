@@ -32,6 +32,8 @@ target/
 # JavaScript package installs and package output
 node_modules/
 **/node_modules/
+dist/
+**/dist/
 .npm/
 .yarn/
 *.tgz

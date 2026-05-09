@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default app capability for the DuckDB shared IPC experiment",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "webview2-shared-buffer:default"
+  ]
+}

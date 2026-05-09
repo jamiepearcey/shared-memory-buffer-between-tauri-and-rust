@@ -1,0 +1,25 @@
+[package]
+name = "tauri-duckdb-experiment"
+version = "0.1.0"
+description = "Native DuckDB over Tauri WebView2 shared IPC"
+authors = ["Codex"]
+edition = "2021"
+rust-version = "1.85.1"
+
+[lib]
+name = "tauri_duckdb_experiment_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { path = "../../tauri/crates/tauri-build", features = [] }
+
+[dependencies]
+arrow-ipc = "58.2.0"
+duckdb = { version = "1.10502.0", features = ["bundled"] }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { path = "../../tauri/crates/tauri", features = [] }
+tauri-plugin-shared-buffer = { path = "../../tauri/crates/tauri-plugin-shared-buffer" }
+thiserror = "2"
+

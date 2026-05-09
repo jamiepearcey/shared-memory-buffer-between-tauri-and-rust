@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tauri DuckDB Shared IPC</title>
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="query-pane">
+        <header>
+          <h1>Native DuckDB</h1>
+          <div id="status" class="status">starting</div>
+        </header>
+        <textarea id="sql" spellcheck="false">SELECT
+  order_status,
+  count(*) AS orders,
+  round(sum(total_amount), 2) AS revenue
+FROM orders
+GROUP BY order_status
+ORDER BY revenue DESC;</textarea>
+        <div class="toolbar">
+          <button id="run-query" type="button">Run Query</button>
+          <button id="sample-query" type="button">Load Sample</button>
+        </div>
+      </section>
+      <section class="result-pane">
+        <div class="result-meta">
+          <strong id="row-count">0 rows</strong>
+          <span id="schema"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead id="result-head"></thead>
+            <tbody id="result-body"></tbody>
+          </table>
+        </div>
+        <pre id="error" hidden></pre>
+      </section>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
+
