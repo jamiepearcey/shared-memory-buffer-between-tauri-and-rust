@@ -74,3 +74,12 @@ cargo test -p tauri-plugin-shared-buffer -- --ignored --nocapture
 ```
 
 The performance tests compare shared-memory frame dispatch against JSON-style IPC payload encoding for small and large binary payloads.
+
+Measured baseline:
+
+| Scenario | Shared-memory frames | JSON-style IPC baseline |
+| --- | ---: | ---: |
+| Large binary payloads, 2,000 iterations, 125.0 MiB total | 14.316834 ms, 8731.0 MiB/s | 16.264259959 s, 7.7 MiB/s |
+| Small binary payloads, 10,000 iterations, 2.4 MiB total | 15.827209 ms, 154.3 MiB/s | 369.489125 ms, 6.6 MiB/s |
+
+These numbers measure local frame dispatch and serialization overhead. They do not include a live WebView2 runtime or frontend event-loop timing.
