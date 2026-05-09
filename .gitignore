@@ -1,0 +1,46 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor and IDE state
+.idea/
+.vscode/
+*.sublime*
+*.swp
+*.swo
+
+# Environment and local config
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs and runtime state
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.pid
+*.pid.lock
+
+# Rust build output
+target/
+**/target/
+
+# JavaScript package installs and package output
+node_modules/
+**/node_modules/
+.npm/
+.yarn/
+*.tgz
+
+# Tauri generated mobile output
+**/src-tauri/gen/
+
+# Temporary and cache files
+.cache/
+tmp/
+temp/
+*.tmp
