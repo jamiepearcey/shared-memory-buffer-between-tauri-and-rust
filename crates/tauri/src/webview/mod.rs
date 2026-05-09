@@ -192,6 +192,13 @@ impl PlatformWebview {
     self.0.environment.clone()
   }
 
+  /// Returns the WebView2 webview instance.
+  #[cfg(windows)]
+  #[cfg_attr(docsrs, doc(cfg(windows)))]
+  pub fn webview(&self) -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2 {
+    self.0.webview.clone()
+  }
+
   /// Returns the [WKWebView] handle.
   ///
   /// [WKWebView]: https://developer.apple.com/documentation/webkit/wkwebview

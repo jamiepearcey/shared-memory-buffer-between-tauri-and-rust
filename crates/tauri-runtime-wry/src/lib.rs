@@ -4037,6 +4037,7 @@ fn handle_user_message<T: UserEvent>(
               f(Webview {
                 controller: webview.controller(),
                 environment: webview.environment(),
+                webview: webview.webview(),
               });
             }
             #[cfg(target_os = "android")]

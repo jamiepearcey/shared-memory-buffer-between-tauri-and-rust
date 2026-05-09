@@ -14,6 +14,7 @@ members = [
   "crates/tauri-bundler",
   "crates/tauri-macos-sign",
   "crates/tauri-driver",
+  "crates/tauri-plugin-shared-buffer",
 
   # @tauri-apps/cli rust project
   "packages/cli",
@@ -72,3 +73,4 @@ schemars_derive = { git = 'https://github.com/tauri-apps/schemars.git', branch =
 tauri = { path = "./crates/tauri" }
 tauri-plugin = { path = "./crates/tauri-plugin" }
 tauri-utils = { path = "./crates/tauri-utils" }
+wry = { path = "../wry" }
