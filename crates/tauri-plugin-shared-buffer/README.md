@@ -58,3 +58,19 @@ await window.__TAURI__.core.invoke("plugin:webview2-shared-buffer|create_shared_
 ```
 
 WebView2 delivers the shared memory to script as an `ArrayBuffer` backed by WebView2 shared memory, not as a JavaScript `SharedArrayBuffer` instance.
+
+## Tests
+
+Run correctness tests:
+
+```sh
+cargo test -p tauri-plugin-shared-buffer
+```
+
+Run the ignored performance baselines:
+
+```sh
+cargo test -p tauri-plugin-shared-buffer -- --ignored --nocapture
+```
+
+The performance tests compare shared-memory frame dispatch against JSON-style IPC payload encoding for small and large binary payloads.

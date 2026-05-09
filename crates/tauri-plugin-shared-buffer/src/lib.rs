@@ -10,6 +10,9 @@ use tauri::{
   Manager, Runtime, State, WebviewWindow,
 };
 
+#[cfg(any(test, windows))]
+mod shared_ipc;
+
 const DEFAULT_CHANNEL_CAPACITY: u64 = 1024 * 1024;
 
 const INIT_SCRIPT: &str = r#"
@@ -392,15 +395,6 @@ mod platform {
   };
   use windows_core::{Interface, PCWSTR};
 
-  const BUFFER_MAGIC: u32 = 0x4950_4254;
-  const BUFFER_VERSION: u32 = 1;
-  const BUFFER_HEADER_SIZE: usize = 16;
-  const FRAME_HEADER_SIZE: usize = 32;
-  const FRAME_KIND_REQUEST: u32 = 1;
-  const FRAME_KIND_RESPONSE: u32 = 2;
-  const STATUS_OK: i32 = 0;
-  const STATUS_ERROR: i32 = 1;
-
   pub struct SharedBufferStore {
     next_buffer_id: AtomicU64,
     next_channel_id: AtomicU64,
@@ -506,8 +500,8 @@ mod platform {
       let (response_entry, _) =
         create_webview2_buffer(&platform_webview, request.response_capacity)?;
 
-      init_channel_buffer(&request_entry)?;
-      init_channel_buffer(&response_entry)?;
+      with_entry_slice_mut(&request_entry, shared_ipc::init_buffer)?;
+      with_entry_slice_mut(&response_entry, shared_ipc::init_buffer)?;
 
       post_shared_buffer(
         &webview17,
@@ -548,7 +542,7 @@ mod platform {
         .get_mut(&channel_id)
         .ok_or(Error::ChannelNotFound(channel_id))?;
 
-      init_channel_buffer(&channel.response)?;
+      with_entry_slice_mut(&channel.response, shared_ipc::init_buffer)?;
       let response_write_offset = drain_requests(channel_id, channel, &self.methods)?;
 
       Ok(SharedChannelDispatch {
@@ -633,110 +627,32 @@ mod platform {
     channel: &mut SharedChannel,
     methods: &Mutex<HashMap<String, SharedIpcHandler>>,
   ) -> Result<u32> {
-    let request_write = read_u32(&channel.request, 8)? as usize;
-    if request_write < BUFFER_HEADER_SIZE || request_write > channel.request.size as usize {
-      return Err(Error::InvalidFrame);
-    }
+    let request = unsafe {
+      std::slice::from_raw_parts_mut(channel.request.ptr.as_ptr(), channel.request.size as usize)
+    };
+    let response = unsafe {
+      std::slice::from_raw_parts_mut(
+        channel.response.ptr.as_ptr(),
+        channel.response.size as usize,
+      )
+    };
 
-    let mut request_offset = BUFFER_HEADER_SIZE;
-    let mut response_offset = BUFFER_HEADER_SIZE;
-
-    while request_offset < request_write {
-      let frame_len = read_u32(&channel.request, request_offset)? as usize;
-      let kind = read_u32(&channel.request, request_offset + 4)?;
-      let request_id = read_u32(&channel.request, request_offset + 8)?;
-      let method_len = read_u32(&channel.request, request_offset + 12)? as usize;
-      let payload_len = read_u32(&channel.request, request_offset + 16)? as usize;
-
-      if kind != FRAME_KIND_REQUEST
-        || frame_len < FRAME_HEADER_SIZE
-        || request_offset + frame_len > request_write
-        || FRAME_HEADER_SIZE + method_len + payload_len > frame_len
-      {
-        return Err(Error::InvalidFrame);
-      }
-
-      let method_start = request_offset + FRAME_HEADER_SIZE;
-      let payload_start = method_start + method_len;
-      let request_slice = unsafe {
-        std::slice::from_raw_parts(channel.request.ptr.as_ptr(), channel.request.size as usize)
-      };
-      let method = std::str::from_utf8(&request_slice[method_start..payload_start])
-        .map_err(|_| Error::InvalidFrame)?;
-      let payload = &request_slice[payload_start..payload_start + payload_len];
-
-      let handler = methods.lock().unwrap().get(method).cloned();
-      let (status, response) = match handler {
-        Some(handler) => match handler(SharedIpcRequest {
-          channel_id,
-          request_id,
-          method,
-          payload,
-        }) {
-          Ok(response) => (STATUS_OK, response),
-          Err(error) => (STATUS_ERROR, error.to_string().into_bytes()),
+    shared_ipc::dispatch_requests(channel_id, request, response, |request| {
+      let handler = methods.lock().unwrap().get(request.method).cloned();
+      match handler {
+        Some(handler) => match handler(request) {
+          Ok(response) => (shared_ipc::STATUS_OK, response),
+          Err(error) => (shared_ipc::STATUS_ERROR, error.to_string().into_bytes()),
         },
         None => (
-          STATUS_ERROR,
-          Error::MethodNotFound(method.to_string())
+          shared_ipc::STATUS_ERROR,
+          Error::MethodNotFound(request.method.to_string())
             .to_string()
             .into_bytes(),
         ),
-      };
-
-      response_offset = write_response_frame(
-        &channel.response,
-        response_offset,
-        request_id,
-        status,
-        &response,
-      )?;
-      request_offset += frame_len;
-    }
-
-    write_u32(&channel.request, 8, BUFFER_HEADER_SIZE as u32)?;
-    write_u32(&channel.response, 8, response_offset as u32)?;
-    Ok(response_offset as u32)
-  }
-
-  fn write_response_frame(
-    response: &SharedBufferEntry,
-    offset: usize,
-    request_id: u32,
-    status: i32,
-    payload: &[u8],
-  ) -> Result<usize> {
-    let frame_len = align8(FRAME_HEADER_SIZE + payload.len());
-    if offset + frame_len > response.size as usize {
-      return Err(Error::ResponseBufferFull);
-    }
-
-    write_u32(response, offset, frame_len as u32)?;
-    write_u32(response, offset + 4, FRAME_KIND_RESPONSE)?;
-    write_u32(response, offset + 8, request_id)?;
-    write_u32(response, offset + 12, 0)?;
-    write_u32(response, offset + 16, payload.len() as u32)?;
-    write_i32(response, offset + 20, status)?;
-    write_u32(response, offset + 24, 0)?;
-    write_u32(response, offset + 28, 0)?;
-
-    unsafe {
-      ptr::copy_nonoverlapping(
-        payload.as_ptr(),
-        response.ptr.as_ptr().add(offset + FRAME_HEADER_SIZE),
-        payload.len(),
-      );
-      ptr::write_bytes(
-        response
-          .ptr
-          .as_ptr()
-          .add(offset + FRAME_HEADER_SIZE + payload.len()),
-        0,
-        frame_len - FRAME_HEADER_SIZE - payload.len(),
-      );
-    }
-
-    Ok(offset + frame_len)
+      }
+    })
+    .map(|offset| offset as u32)
   }
 
   fn create_webview2_buffer(
@@ -784,14 +700,6 @@ mod platform {
     Ok(())
   }
 
-  fn init_channel_buffer(entry: &SharedBufferEntry) -> Result<()> {
-    write_u32(entry, 0, BUFFER_MAGIC)?;
-    write_u32(entry, 4, BUFFER_VERSION)?;
-    write_u32(entry, 8, BUFFER_HEADER_SIZE as u32)?;
-    write_u32(entry, 12, 0)?;
-    Ok(())
-  }
-
   fn validate_size(size: u64) -> Result<()> {
     if size == 0 {
       return Err(Error::EmptyBuffer);
@@ -804,7 +712,7 @@ mod platform {
 
   fn validate_channel_capacity(size: u64) -> Result<()> {
     validate_size(size)?;
-    if size < (BUFFER_HEADER_SIZE + FRAME_HEADER_SIZE) as u64 {
+    if size < shared_ipc::MIN_CHANNEL_CAPACITY as u64 {
       return Err(Error::ChannelBufferTooSmall);
     }
     if size > u32::MAX as u64 {
@@ -840,30 +748,12 @@ mod platform {
     NonNull::new(ptr).ok_or_else(|| Error::WebView2("shared buffer pointer was null".into()))
   }
 
-  fn read_u32(entry: &SharedBufferEntry, offset: usize) -> Result<u32> {
-    if offset + 4 > entry.size as usize {
-      return Err(Error::InvalidFrame);
-    }
-    let value = unsafe { ptr::read_unaligned(entry.ptr.as_ptr().add(offset) as *const u32) };
-    Ok(u32::from_le(value))
-  }
-
-  fn write_u32(entry: &SharedBufferEntry, offset: usize, value: u32) -> Result<()> {
-    if offset + 4 > entry.size as usize {
-      return Err(Error::InvalidFrame);
-    }
-    unsafe {
-      ptr::write_unaligned(entry.ptr.as_ptr().add(offset) as *mut u32, value.to_le());
-    }
-    Ok(())
-  }
-
-  fn write_i32(entry: &SharedBufferEntry, offset: usize, value: i32) -> Result<()> {
-    write_u32(entry, offset, value as u32)
-  }
-
-  fn align8(value: usize) -> usize {
-    (value + 7) & !7
+  fn with_entry_slice_mut<T>(
+    entry: &SharedBufferEntry,
+    f: impl FnOnce(&mut [u8]) -> Result<T>,
+  ) -> Result<T> {
+    let slice = unsafe { std::slice::from_raw_parts_mut(entry.ptr.as_ptr(), entry.size as usize) };
+    f(slice)
   }
 
   fn close_entry(entry: SharedBufferEntry) -> Result<()> {
@@ -919,8 +809,9 @@ fn validate_create_request(request: &CreateSharedBufferRequest) -> Result<()> {
 
 #[cfg(windows)]
 fn validate_channel_request(request: &CreateSharedChannelRequest) -> Result<()> {
-  let min_size = 16 + 32;
-  if request.request_capacity < min_size || request.response_capacity < min_size {
+  if request.request_capacity < shared_ipc::MIN_CHANNEL_CAPACITY as u64
+    || request.response_capacity < shared_ipc::MIN_CHANNEL_CAPACITY as u64
+  {
     return Err(Error::ChannelBufferTooSmall);
   }
   if request.request_capacity > u32::MAX as u64 || request.response_capacity > u32::MAX as u64 {
